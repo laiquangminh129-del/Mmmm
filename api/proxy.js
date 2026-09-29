@@ -1,91 +1,56 @@
-export default {
-  async fetch(request, env, ctx) {
-    const TARGET_HOST = "api.freetheai.org";
-    
-    // Nếu muốn giấu API Key thì điền vào đây, không thì để rỗng ""
-    const FIXED_API_KEY = ""; 
+export default async function handler(req, res) {
+  // Cấu hình CORS mở hoàn toàn
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
 
-    // 1. Xử lý CORS Preflight cho Browser
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "*",
-          "Access-Control-Allow-Headers": "*",
-        },
-      });
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  const TARGET_HOST = 'api.freetheai.org';
+  const subPath = req.url.replace('/api/proxy', '');
+
+  // Trả về 200 OK khi Lorebary ping kiểm tra trang chủ
+  if (!subPath || subPath === '/' || subPath === '') {
+    return res.status(200).json({ status: 'online', message: 'OpenAI Compatible Proxy' });
+  }
+
+  const targetUrl = `https://${TARGET_HOST}${subPath}`;
+
+  try {
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if (
+        lower !== 'host' &&
+        lower !== 'referer' &&
+        lower !== 'content-length' &&
+        !lower.startsWith('x-vercel-')
+      ) {
+        headers[key] = value;
+      }
     }
 
-    try {
-      // 2. Tạo URL đích
-      const url = new URL(request.url);
-      url.hostname = TARGET_HOST;
-      url.protocol = "https:";
-      url.port = "";
+    const fetchOptions = {
+      method: req.method,
+      headers: headers,
+    };
 
-      // 3. Lọc bỏ các Header thừa gây lỗi kết nối
-      const headers = new Headers();
-      for (const [key, value] of request.headers.entries()) {
-        const lowerKey = key.toLowerCase();
-        if (
-          !lowerKey.startsWith("cf-") &&
-          !lowerKey.startsWith("x-forwarded-") &&
-          lowerKey !== "host" &&
-          lowerKey !== "referer"
-        ) {
-          headers.set(key, value);
-        }
-      }
-
-      // 4. Gắn API Key nếu có cấu hình
-      if (FIXED_API_KEY && FIXED_API_KEY.trim() !== "") {
-        const authHeader = FIXED_API_KEY.startsWith("Bearer ")
-          ? FIXED_API_KEY
-          : `Bearer ${FIXED_API_KEY}`;
-        headers.set("Authorization", authHeader);
-      }
-
-      // 5. Cấu hình request gửi đi
-      const fetchInit = {
-        method: request.method,
-        headers: headers,
-        redirect: "follow",
-      };
-
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        fetchInit.body = request.body;
-      }
-
-      // 6. Gửi request tới API gốc
-      const response = await fetch(url.toString(), fetchInit);
-
-      // 7. Trả kết quả kèm CORS
-      const responseHeaders = new Headers(response.headers);
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      responseHeaders.set("Access-Control-Allow-Methods", "*");
-      responseHeaders.set("Access-Control-Allow-Headers", "*");
-
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-      });
-
-    } catch (err) {
-      return new Response(
-        JSON.stringify({
-          error: "Proxy Connection Failed",
-          message: err.message,
-        }),
-        {
-          status: 502,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-          },
-        }
-      );
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      fetchOptions.body = typeof req.body === 'object' ? JSON.stringify(req.body) : req.body;
     }
-  },
-};
+
+    const response = await fetch(targetUrl, fetchOptions);
+    const data = await response.text();
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      res.setHeader('Content-Type', contentType);
+    }
+
+    return res.status(response.status).send(data);
+  } catch (error) {
+    return res.status(500).json({ error: 'Proxy failed', message: error.message });
+  }
+}
