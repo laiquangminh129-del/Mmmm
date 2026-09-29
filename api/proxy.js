@@ -2,10 +2,10 @@ export default {
   async fetch(request, env, ctx) {
     const TARGET_HOST = "api.freetheai.org";
     
-    // Nếu muốn ẩn API Key thì điền vào đây, không thì để rỗng ""
+    // Nếu muốn giấu API Key thì điền vào đây, không thì để rỗng ""
     const FIXED_API_KEY = ""; 
 
-    // 1. Xử lý CORS Preflight
+    // 1. Xử lý CORS Preflight cho Browser
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -24,7 +24,7 @@ export default {
       url.protocol = "https:";
       url.port = "";
 
-      // 3. Lọc bỏ các Header thừa
+      // 3. Lọc bỏ các Header thừa gây lỗi kết nối
       const headers = new Headers();
       for (const [key, value] of request.headers.entries()) {
         const lowerKey = key.toLowerCase();
@@ -57,7 +57,7 @@ export default {
         fetchInit.body = request.body;
       }
 
-      // 6. Chuyển tiếp request
+      // 6. Gửi request tới API gốc
       const response = await fetch(url.toString(), fetchInit);
 
       // 7. Trả kết quả kèm CORS
