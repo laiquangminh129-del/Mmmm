@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+  // Cấu hình CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -9,7 +10,12 @@ export default async function handler(req, res) {
 
   const subPath = req.url.replace('/api/proxy', '');
 
-  // 1. Giả lập /models cho Lorebary
+  // 1. Chặn các đường dẫn Lorebary dùng để Ping test (/, /v1, /v1/)
+  if (!subPath || subPath === '/' || subPath === '' || subPath === '/v1' || subPath === '/v1/') {
+    return res.status(200).json({ status: 'online', message: 'OpenAI Compatible Proxy' });
+  }
+
+  // 2. Giả lập danh sách Models chuẩn OpenAI
   if (subPath.includes('/models')) {
     return res.status(200).json({
       object: "list",
@@ -21,15 +27,11 @@ export default async function handler(req, res) {
     });
   }
 
-  if (!subPath || subPath === '/' || subPath === '') {
-    return res.status(200).json({ status: 'online', message: 'OpenAI Compatible Proxy' });
-  }
-
+  // 3. Chuyển tiếp request thực tế tới FreeTheAI
   const TARGET_HOST = 'api.freetheai.org';
   const targetUrl = `https://${TARGET_HOST}${subPath}`;
 
   try {
-    // 2. Tạo Header sạch, loại bỏ hoàn toàn dấu vết từ Lorebary
     const headers = {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'accept': '*/*',
@@ -55,7 +57,7 @@ export default async function handler(req, res) {
     const response = await fetch(targetUrl, fetchOptions);
     let data = await response.text();
 
-    // 3. Tẩy từ khóa nhận diện
+    // 4. Xóa từ khóa nhận diện
     data = data.replaceAll('FreeTheAI', 'OpenAI')
                .replaceAll('freetheai', 'openai');
 
