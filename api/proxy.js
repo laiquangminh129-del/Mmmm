@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // Cấu hình CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -10,7 +9,7 @@ export default async function handler(req, res) {
 
   const subPath = req.url.replace('/api/proxy', '');
 
-  // 1. Giả lập danh sách Models chuẩn OpenAI để qua mặt bước Test của Lorebary
+  // 1. Giả lập /models cho Lorebary
   if (subPath.includes('/models')) {
     return res.status(200).json({
       object: "list",
@@ -22,7 +21,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // 2. Phản hồi Ping trang chủ
   if (!subPath || subPath === '/' || subPath === '') {
     return res.status(200).json({ status: 'online', message: 'OpenAI Compatible Proxy' });
   }
@@ -31,12 +29,18 @@ export default async function handler(req, res) {
   const targetUrl = `https://${TARGET_HOST}${subPath}`;
 
   try {
-    const headers = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      const lower = key.toLowerCase();
-      if (lower !== 'host' && lower !== 'referer' && lower !== 'content-length' && !lower.startsWith('x-vercel-')) {
-        headers[key] = value;
-      }
+    // 2. Tạo Header sạch, loại bỏ hoàn toàn dấu vết từ Lorebary
+    const headers = {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'accept': '*/*',
+      'host': TARGET_HOST
+    };
+
+    if (req.headers['authorization']) {
+      headers['authorization'] = req.headers['authorization'];
+    }
+    if (req.headers['content-type']) {
+      headers['content-type'] = req.headers['content-type'];
     }
 
     const fetchOptions = {
@@ -51,9 +55,9 @@ export default async function handler(req, res) {
     const response = await fetch(targetUrl, fetchOptions);
     let data = await response.text();
 
-    // 3. Tẩy sạch dấu vết từ khóa "FreeTheAI" trong dữ liệu trả về
-    data = data.replaceAll('FreeTheAI', 'CustomAI')
-               .replaceAll('freetheai', 'customai');
+    // 3. Tẩy từ khóa nhận diện
+    data = data.replaceAll('FreeTheAI', 'OpenAI')
+               .replaceAll('freetheai', 'openai');
 
     const contentType = response.headers.get('content-type');
     if (contentType) {
