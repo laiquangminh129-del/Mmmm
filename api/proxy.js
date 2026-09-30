@@ -3,7 +3,6 @@ export const config = {
 };
 
 export default async function handler(req) {
-  // 1. Xử lý CORS
   if (req.method === \'OPTIONS\') {
     return new Response(null, {
       status: 200,
@@ -16,19 +15,12 @@ export default async function handler(req) {
   }
 
   const url = new URL(req.url);
-  
-  // Lấy path từ rewrite ?path=$1
   let rawPath = url.searchParams.get(\'path\') || \'/\';
   if (!rawPath.startsWith(\'/\')) rawPath = \'/\' + rawPath;
   
-  // Lấy query gốc trừ param `path` để forward tiếp
-  const searchParams = new URLSearchParams(url.searchParams);
-  searchParams.delete(\'path\');
-  const queryString = searchParams.toString() ? `?${searchParams.toString()}` : \'\';
-
   let cleanPath = rawPath.replace(/\/v1\/v1/g, \'/v1\');
 
-  // 2. Fake response cho LoreBary test
+  // Fake cho LoreBary test
   if (req.method === \'GET\') {
     if (cleanPath === \'/\' || cleanPath === \'/v1\' || cleanPath === \'/v1/\') {
       return new Response(JSON.stringify({ status: \'online\', message: \'Proxy Active\' }), {
@@ -48,54 +40,50 @@ export default async function handler(req) {
     }
   }
 
-  // Tự bổ sung /v1 nếu thiếu
   if (!cleanPath.startsWith(\'/v1\') && cleanPath !== \'/\') {
     cleanPath = \'/v1\' + cleanPath;
   }
 
   const TARGET_HOST = \'api.freetheai.org\';
-  const targetUrl = `https://${TARGET_HOST}${cleanPath}${queryString}`;
+  const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
 
   try {
     const headers = new Headers();
-    headers.set(\'User-Agent\', \'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\');
-    headers.set(\'Accept\', \'application/json, text/event-stream, */*\');
-    if (req.headers.get(\'content-type\')) headers.set(\'Content-Type\', req.headers.get(\'content-type\'));
+    headers.set(\'Accept\', \'*/*\');
+    headers.set(\'Content-Type\', req.headers.get(\'content-type\') || \'application/json\');
     
-    // Giữ Authorization gốc, nếu không có thì dùng free
-    if (req.headers.has(\'authorization\')) {
+    // Fix lỗi 500: Không set Host trên Edge
+    if (req.headers.get(\'authorization\')) {
       headers.set(\'Authorization\', req.headers.get(\'authorization\'));
     } else {
       headers.set(\'Authorization\', \'Bearer free\');
     }
 
-    const fetchOptions = {
-      method: req.method,
-      headers: headers,
-      duplex: \'half\', // BẮT BUỘC cho streaming trên Edge
-    };
-
-    if (req.method !== \'GET\' && req.method !== \'HEAD\' && req.body) {
-      fetchOptions.body = req.body;
+    // Fix lỗi 500: Edge không cho stream trực tiếp, phải đọc text trước
+    let body = undefined;
+    if (req.method !== \'GET\' && req.method !== \'HEAD\') {
+      body = await req.text();
     }
 
-    const response = await fetch(targetUrl, fetchOptions);
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: headers,
+      body: body,
+    });
 
-    // Forward stream trực tiếp, không dùng response.text()
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set(\'Access-Control-Allow-Origin\', \'*\');
-    responseHeaders.set(\'Access-Control-Allow-Methods\', \'*\');
-    responseHeaders.set(\'Access-Control-Allow-Headers\', \'*\');
-
+    // Forward stream về cho Janitor
+    const resHeaders = new Headers(response.headers);
+    resHeaders.set(\'Access-Control-Allow-Origin\', \'*\');
+    
     return new Response(response.body, {
       status: response.status,
-      headers: responseHeaders,
+      headers: resHeaders,
     });
 
   } catch (error) {
-    return new Response(JSON.stringify({ error: { code: 500, message: \'Proxy forwarding error: \' + error.message } }), {
+    return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
       headers: { \'Content-Type\': \'application/json\', \'Access-Control-Allow-Origin\': \'*\' }
     });
   }
-    }
+}
