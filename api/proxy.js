@@ -1,5 +1,5 @@
 export const config = {
-  runtime: 'edge', // Bật Edge Runtime chống Timeout & hỗ trợ Streaming trực tiếp
+  runtime: 'edge', // Sử dụng Vercel Edge Runtime chống Timeout & hỗ trợ Streaming
 };
 
 export default async function handler(req) {
@@ -16,28 +16,26 @@ export default async function handler(req) {
   }
 
   const url = new URL(req.url);
-  
-  // SỬA LỖI NUỐT ĐƯỜNG DẪN: Ghép lại toàn bộ mảng path bị Vercel tách rời
-  const pathSegments = url.searchParams.getAll('path');
-  let targetPath = pathSegments.length > 0 ? pathSegments.join('/') : '';
 
-  if (!targetPath) {
-    targetPath = url.pathname.replace('/api/proxy', '').replace(/^\//, '');
+  // Lấy nguyên vẹn chuỗi đường dẫn gốc từ $1
+  let rawPath = url.searchParams.get('path') || '';
+  if (!rawPath.startsWith('/')) {
+    rawPath = '/' + rawPath;
   }
 
-  // Chuẩn hóa loại bỏ trùng lặp v1
-  targetPath = targetPath.replace(/^v1\/v1/, 'v1');
+  // Khử trùng lặp /v1/v1 nếu client gửi nhầm
+  let cleanPath = rawPath.replace(/\/v1\/v1/g, '/v1');
 
   // 2. Trả về phản hồi giả lập cho các request GET kiểm tra (Ping / Models) từ Lorebary
   if (req.method === 'GET') {
-    if (!targetPath || targetPath === 'v1' || targetPath === 'v1/') {
+    if (cleanPath === '/' || cleanPath === '/v1' || cleanPath === '/v1/') {
       return new Response(JSON.stringify({ status: 'online', message: 'Proxy Active' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       });
     }
 
-    if (targetPath.includes('models')) {
+    if (cleanPath.includes('/models')) {
       return new Response(JSON.stringify({
         object: 'list',
         data: [
@@ -52,33 +50,16 @@ export default async function handler(req) {
     }
   }
 
-  // Tự động bổ sung v1/ nếu chưa có
-  if (!targetPath.startsWith('v1') && targetPath !== '') {
-    targetPath = 'v1/' + targetPath;
+  // Tự động bổ sung /v1 nếu chưa có
+  if (!cleanPath.startsWith('/v1') && cleanPath !== '/') {
+    cleanPath = '/v1' + cleanPath;
   }
 
   const TARGET_HOST = 'api.freetheai.org';
-  const targetUrl = `https://${TARGET_HOST}/${targetPath}`;
+  const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
 
   try {
-    // 3. Đọc dữ liệu Body an toàn
-    let bodyText = null;
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      bodyText = await req.text();
-      try {
-        if (bodyText) {
-          const parsed = JSON.parse(bodyText);
-          if (!parsed.model || parsed.model.trim() === '') {
-            parsed.model = 'gpt-4o';
-          }
-          bodyText = JSON.stringify(parsed);
-        }
-      } catch (e) {
-        // Dữ liệu không phải JSON thì giữ nguyên
-      }
-    }
-
-    // 4. Giả dạng Header hợp lệ
+    // 3. Header giả dạng hợp lệ
     const headers = new Headers();
     headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     headers.set('Accept', 'application/json, text/event-stream, */*');
@@ -94,21 +75,19 @@ export default async function handler(req) {
     const fetchOptions = {
       method: req.method,
       headers: headers,
-      body: bodyText,
     };
 
-    // 5. Chuyển tiếp request tới đúng URL https://api.freetheai.org/v1/chat/completions
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      fetchOptions.body = req.body;
+    }
+
+    // 4. Chuyển tiếp tới đúng URL https://api.freetheai.org/v1/chat/completions
     const response = await fetch(targetUrl, fetchOptions);
 
-    const responseHeaders = new Headers();
+    const responseHeaders = new Headers(response.headers);
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Methods', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
-
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      responseHeaders.set('Content-Type', contentType);
-    }
 
     return new Response(response.body, {
       status: response.status,
