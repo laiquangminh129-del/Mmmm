@@ -1,42 +1,36 @@
+
 export const config = {
-  runtime: \'edge\',
+  api: {
+    bodyParser: false, // BẮT BUỘC để Janitor stream được
+  },
 };
 
-export default async function handler(req) {
-  if (req.method === \'OPTIONS\') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        \'Access-Control-Allow-Origin\': \'*\',
-        \'Access-Control-Allow-Methods\': \'GET, POST, PUT, DELETE, OPTIONS\',
-        \'Access-Control-Allow-Headers\': \'*\',
-      },
-    });
-  }
+export default async function handler(req, res) {
+  res.setHeader(\'Access-Control-Allow-Origin\', \'*\');
+  res.setHeader(\'Access-Control-Allow-Methods\', \'GET, POST, PUT, DELETE, OPTIONS\');
+  res.setHeader(\'Access-Control-Allow-Headers\', \'*\');
 
-  const url = new URL(req.url);
-  let rawPath = url.searchParams.get(\'path\') || \'/\';
-  if (!rawPath.startsWith(\'/\')) rawPath = \'/\' + rawPath;
-  
+  if (req.method === \'OPTIONS\') return res.status(200).end();
+
+  // Lấy path sau /api/proxy
+  let rawPath = req.url.replace(\'/api/proxy\', \'\').split(\'?\')[0];
+  if (!rawPath) rawPath = \'/\';
   let cleanPath = rawPath.replace(/\/v1\/v1/g, \'/v1\');
 
-  // Fake cho LoreBary test
+  // FAKE TEST - GỘP CẢ 2 CODE
   if (req.method === \'GET\') {
-    if (cleanPath === \'/\' || cleanPath === \'/v1\' || cleanPath === \'/v1/\') {
-      return new Response(JSON.stringify({ status: \'online\', message: \'Proxy Active\' }), {
-        status: 200,
-        headers: { \'Content-Type\': \'application/json\', \'Access-Control-Allow-Origin\': \'*\' }
-      });
+    if (cleanPath === \'/\' || cleanPath === \'/v1\' || cleanPath === \'/v1/\' || cleanPath.includes(\'/chat/completions\')) {
+      return res.status(200).json({ status: \'online\', message: \'Proxy Active\' });
     }
     if (cleanPath.includes(\'/models\')) {
-      return new Response(JSON.stringify({
+      return res.status(200).json({
         object: \'list\',
         data: [
           { id: \'gpt-4o\', object: \'model\', created: 1700000000, owned_by: \'system\' },
           { id: \'gpt-4-turbo\', object: \'model\', created: 1700000000, owned_by: \'system\' },
           { id: \'claude-3-5-sonnet\', object: \'model\', created: 1700000000, owned_by: \'system\' }
         ]
-      }), { status: 200, headers: { \'Content-Type\': \'application/json\', \'Access-Control-Allow-Origin\': \'*\' } });
+      });
     }
   }
 
@@ -48,42 +42,42 @@ export default async function handler(req) {
   const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
 
   try {
-    const headers = new Headers();
-    headers.set(\'Accept\', \'*/*\');
-    headers.set(\'Content-Type\', req.headers.get(\'content-type\') || \'application/json\');
-    
-    // Fix lỗi 500: Không set Host trên Edge
-    if (req.headers.get(\'authorization\')) {
-      headers.set(\'Authorization\', req.headers.get(\'authorization\'));
-    } else {
-      headers.set(\'Authorization\', \'Bearer free\');
-    }
+    const headers = {};
+    headers[\'User-Agent\'] = \'Mozilla/5.0\';
+    headers[\'Accept\'] = req.headers[\'accept\'] || \'*/*\';
+    headers[\'Host\'] = TARGET_HOST;
+    if (req.headers[\'authorization\']) headers[\'Authorization\'] = req.headers[\'authorization\'];
+    else headers[\'Authorization\'] = \'Bearer free\';
+    if (req.headers[\'content-type\']) headers[\'Content-Type\'] = req.headers[\'content-type\'];
 
-    // Fix lỗi 500: Edge không cho stream trực tiếp, phải đọc text trước
-    let body = undefined;
-    if (req.method !== \'GET\' && req.method !== \'HEAD\') {
-      body = await req.text();
-    }
+    // Đọc body thô
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? Buffer.concat(chunks) : undefined;
 
     const response = await fetch(targetUrl, {
       method: req.method,
-      headers: headers,
-      body: body,
+      headers,
+      body: req.method !== \'GET\' && req.method !== \'HEAD\' ? body : undefined,
     });
 
-    // Forward stream về cho Janitor
-    const resHeaders = new Headers(response.headers);
-    resHeaders.set(\'Access-Control-Allow-Origin\', \'*\');
-    
-    return new Response(response.body, {
-      status: response.status,
-      headers: resHeaders,
+    res.status(response.status);
+    response.headers.forEach((v, k) => {
+      if (![\'content-encoding\', \'content-length\'].includes(k.toLowerCase())) {
+        res.setHeader(k, v);
+      }
     });
+    res.setHeader(\'Access-Control-Allow-Origin\', \'*\');
 
-  } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { \'Content-Type\': \'application/json\', \'Access-Control-Allow-Origin\': \'*\' }
-    });
+    // Pipe stream - QUAN TRỌNG CHO JANITOR
+    if (response.body) {
+      for await (const chunk of response.body) res.write(chunk);
+      return res.end();
+    } else {
+      const text = await response.text();
+      return res.send(text);
+    }
+  } catch (e) {
+    return res.status(500).json({ error: \'Proxy failed\', message: e.message });
   }
 }
