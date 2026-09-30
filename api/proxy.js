@@ -1,5 +1,5 @@
 export const config = {
-  runtime: 'edge', // Bật Edge Runtime chống Timeout & hỗ trợ Streaming
+  runtime: 'edge', // Bật Edge Runtime chống Timeout & hỗ trợ Streaming trực tiếp
 };
 
 export default async function handler(req) {
@@ -17,16 +17,18 @@ export default async function handler(req) {
 
   const url = new URL(req.url);
   
-  // Trích xuất lại đường dẫn thực tế do vercel.json truyền sang
-  let targetPath = url.searchParams.get('path') || '';
-  url.searchParams.delete('path');
+  // SỬA LỖI NUỐT ĐƯỜNG DẪN: Ghép lại toàn bộ mảng path bị Vercel tách rời
+  const pathSegments = url.searchParams.getAll('path');
+  let targetPath = pathSegments.length > 0 ? pathSegments.join('/') : '';
 
-  if (targetPath.startsWith('/')) {
-    targetPath = targetPath.slice(1);
+  if (!targetPath) {
+    targetPath = url.pathname.replace('/api/proxy', '').replace(/^\//, '');
   }
-  targetPath = targetPath.replace(/v1\/v1/g, 'v1');
 
-  // 2. Giả lập phản hồi cho các request GET kiểm tra (Ping / Models) từ Lorebary
+  // Chuẩn hóa loại bỏ trùng lặp v1
+  targetPath = targetPath.replace(/^v1\/v1/, 'v1');
+
+  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra (Ping / Models) từ Lorebary
   if (req.method === 'GET') {
     if (!targetPath || targetPath === 'v1' || targetPath === 'v1/') {
       return new Response(JSON.stringify({ status: 'online', message: 'Proxy Active' }), {
@@ -50,14 +52,13 @@ export default async function handler(req) {
     }
   }
 
-  // Đảm bảo đường dẫn luôn bắt đầu bằng v1/
-  if (!targetPath.startsWith('v1')) {
+  // Tự động bổ sung v1/ nếu chưa có
+  if (!targetPath.startsWith('v1') && targetPath !== '') {
     targetPath = 'v1/' + targetPath;
   }
 
   const TARGET_HOST = 'api.freetheai.org';
-  const queryString = url.search ? url.search : '';
-  const targetUrl = `https://${TARGET_HOST}/${targetPath}${queryString}`;
+  const targetUrl = `https://${TARGET_HOST}/${targetPath}`;
 
   try {
     // 3. Đọc dữ liệu Body an toàn
@@ -73,11 +74,11 @@ export default async function handler(req) {
           bodyText = JSON.stringify(parsed);
         }
       } catch (e) {
-        // Giữ nguyên nếu không phải JSON
+        // Dữ liệu không phải JSON thì giữ nguyên
       }
     }
 
-    // 4. Header giả dạng hợp lệ
+    // 4. Giả dạng Header hợp lệ
     const headers = new Headers();
     headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     headers.set('Accept', 'application/json, text/event-stream, */*');
@@ -96,7 +97,7 @@ export default async function handler(req) {
       body: bodyText,
     };
 
-    // 5. Chuyển tiếp request chính xác tới endpoint https://api.freetheai.org/v1/chat/completions
+    // 5. Chuyển tiếp request tới đúng URL https://api.freetheai.org/v1/chat/completions
     const response = await fetch(targetUrl, fetchOptions);
 
     const responseHeaders = new Headers();
