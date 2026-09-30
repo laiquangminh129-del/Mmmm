@@ -1,46 +1,56 @@
-export const config = {
-  runtime: 'edge',
-};
+export default async function handler(req, res) {
+  // ==========================================
+  // CORS
+  // ==========================================
 
-export default async function handler(req) {
-  // =========================
-  // CORS PREFLIGHT
-  // =========================
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+  );
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    '*'
+  );
+
   if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods':
-          'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': '*',
-        'Access-Control-Max-Age': '86400',
-      },
-    });
+    return res.status(204).end();
   }
 
-  const url = new URL(req.url);
+  // ==========================================
+  // XÁC ĐỊNH PATH
+  // ==========================================
 
-  // vercel.json sẽ truyền path vào đây
-  let path = url.searchParams.get('path') || '/';
+  let path = req.url || '/';
 
-  if (!path.startsWith('/')) {
-    path = '/' + path;
+  // Loại /api/proxy khỏi URL
+  path = path.replace(/^\/api\/proxy/, '');
+
+  // Loại query string
+  path = path.split('?')[0];
+
+  if (!path || path === '') {
+    path = '/';
   }
-
-  // =========================
-  // CLEAN PATH
-  // =========================
 
   // Chống /v1/v1
-  path = path.replace(/^\/v1\/v1/, '/v1');
+  path = path.replace(
+    /^\/v1\/v1/,
+    '/v1'
+  );
 
-  // Xóa slash dư
-  path = path.replace(/\/{2,}/g, '/');
+  // Nếu chỉ gửi /chat/completions
+  // thì tự thêm /v1
+  if (
+    path !== '/' &&
+    !path.startsWith('/v1/')
+  ) {
+    path = '/v1' + path;
+  }
 
-  // =========================
-  // LOCAL HEALTH CHECK
-  // =========================
+  // ==========================================
+  // HEALTH CHECK
+  // ==========================================
 
   if (
     req.method === 'GET' &&
@@ -50,156 +60,224 @@ export default async function handler(req) {
       path === '/v1/'
     )
   ) {
-    return jsonResponse({
+    return res.status(200).json({
       status: 'online',
-      message: 'Vercel FreeTheAI Proxy Active',
-      target: 'https://api.freetheai.org',
+      message: 'OpenAI Compatible Proxy Active'
     });
   }
 
-  // =========================
-  // TARGET FREETHEAI
-  // =========================
+  // ==========================================
+  // MODELS
+  // ==========================================
+
+  if (
+    req.method === 'GET' &&
+    path === '/v1/models'
+  ) {
+    try {
+      const response = await fetch(
+        'https://api.freetheai.org/v1/models',
+        {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+
+            ...(req.headers.authorization
+              ? {
+                  'Authorization':
+                    req.headers.authorization
+                }
+              : {})
+          }
+        }
+      );
+
+      const data = await response.text();
+
+      res.setHeader(
+        'Content-Type',
+        response.headers.get(
+          'content-type'
+        ) || 'application/json'
+      );
+
+      return res
+        .status(response.status)
+        .send(data);
+
+    } catch (error) {
+      return res.status(500).json({
+        error: {
+          message: error.message
+        }
+      });
+    }
+  }
+
+  // ==========================================
+  // FREETHEAI TARGET
+  // ==========================================
 
   const targetUrl =
     `https://api.freetheai.org${path}`;
 
   try {
-    // =========================
+    // ========================================
     // HEADERS
-    // =========================
+    // ========================================
 
-    const headers = new Headers();
+    const headers = {
+      'Accept':
+        req.headers.accept ||
+        'application/json, text/event-stream, */*',
 
-    headers.set(
-      'Accept',
-      req.headers.get('accept') ||
-      'application/json, text/event-stream, */*'
-    );
+      'Content-Type':
+        req.headers['content-type'] ||
+        'application/json',
 
-    headers.set(
-      'Content-Type',
-      req.headers.get('content-type') ||
-      'application/json'
-    );
+      'User-Agent':
+        'OpenAI-Compatible-Proxy/1.0'
+    };
 
-    // Forward Authorization
-    const authorization =
-      req.headers.get('authorization');
+    // QUAN TRỌNG:
+    // chuyển API KEY từ LoreBary -> Vercel
+    // -> FreeTheAI
 
-    if (authorization) {
-      headers.set(
-        'Authorization',
-        authorization
-      );
+    if (req.headers.authorization) {
+      headers['Authorization'] =
+        req.headers.authorization;
     }
 
-    // Forward x-api-key nếu client dùng nó
-    const apiKey =
-      req.headers.get('x-api-key');
-
-    if (apiKey) {
-      headers.set('x-api-key', apiKey);
+    if (req.headers['x-api-key']) {
+      headers['x-api-key'] =
+        req.headers['x-api-key'];
     }
 
-    // =========================
+    // ========================================
     // BODY
-    // =========================
+    // ========================================
 
-    let body = undefined;
+    let body;
 
     if (
       req.method !== 'GET' &&
       req.method !== 'HEAD'
     ) {
-      body = await req.arrayBuffer();
+      if (
+        typeof req.body === 'string'
+      ) {
+        body = req.body;
+      } else if (
+        req.body !== undefined &&
+        req.body !== null
+      ) {
+        body = JSON.stringify(req.body);
+      }
     }
 
-    // =========================
-    // FORWARD REQUEST
-    // =========================
+    // ========================================
+    // SEND TO FREETHEAI
+    // ========================================
 
     const response = await fetch(
       targetUrl,
       {
         method: req.method,
         headers,
-        body,
+        body
       }
     );
 
-    // =========================
-    // RESPONSE HEADERS
-    // =========================
+    // ========================================
+    // COPY RESPONSE HEADERS
+    // ========================================
 
-    const responseHeaders =
-      new Headers(response.headers);
+    const contentType =
+      response.headers.get(
+        'content-type'
+      );
 
-    responseHeaders.set(
-      'Access-Control-Allow-Origin',
-      '*'
-    );
+    if (contentType) {
+      res.setHeader(
+        'Content-Type',
+        contentType
+      );
+    }
 
-    responseHeaders.set(
-      'Access-Control-Allow-Methods',
-      'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-    );
+    const cacheControl =
+      response.headers.get(
+        'cache-control'
+      );
 
-    responseHeaders.set(
-      'Access-Control-Allow-Headers',
-      '*'
-    );
+    if (cacheControl) {
+      res.setHeader(
+        'Cache-Control',
+        cacheControl
+      );
+    }
 
-    responseHeaders.set(
-      'Access-Control-Expose-Headers',
-      '*'
-    );
-
-    // =========================
+    // ========================================
     // STREAM RESPONSE
-    // =========================
+    // ========================================
 
-    return new Response(
-      response.body,
-      {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
+    if (response.body) {
+
+      res.statusCode =
+        response.status;
+
+      const reader =
+        response.body.getReader();
+
+      try {
+
+        while (true) {
+
+          const {
+            done,
+            value
+          } = await reader.read();
+
+          if (done) {
+            break;
+          }
+
+          res.write(
+            Buffer.from(value)
+          );
+        }
+
+      } finally {
+        res.end();
       }
-    );
+
+      return;
+    }
+
+    // ========================================
+    // NON-STREAM RESPONSE
+    // ========================================
+
+    const data =
+      await response.text();
+
+    return res
+      .status(response.status)
+      .send(data);
 
   } catch (error) {
-    return jsonResponse(
-      {
-        error: {
-          type: 'proxy_error',
-          message:
-            error?.message ||
-            'Failed to connect to FreeTheAI',
-        },
-      },
-      500
+
+    console.error(
+      'Proxy Error:',
+      error
     );
+
+    return res.status(500).json({
+      error: {
+        type: 'proxy_error',
+        message:
+          error.message ||
+          'Failed to connect to FreeTheAI'
+      }
+    });
   }
-}
-
-
-// =========================
-// JSON RESPONSE HELPER
-// =========================
-
-function jsonResponse(data, status = 200) {
-  return new Response(
-    JSON.stringify(data),
-    {
-      status,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods':
-          'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': '*',
-      },
-    }
-  );
 }
