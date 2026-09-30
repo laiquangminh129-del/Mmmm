@@ -11,7 +11,8 @@ export default async function handler(req) {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods':
+          'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': '*',
         'Access-Control-Max-Age': '86400',
       },
@@ -20,7 +21,7 @@ export default async function handler(req) {
 
   const url = new URL(req.url);
 
-  // Path được truyền từ vercel.json
+  // vercel.json sẽ truyền path vào đây
   let path = url.searchParams.get('path') || '/';
 
   if (!path.startsWith('/')) {
@@ -31,41 +32,33 @@ export default async function handler(req) {
   // CLEAN PATH
   // =========================
 
-  // /v1/v1/chat/completions
-  // -> /v1/chat/completions
+  // Chống /v1/v1
   path = path.replace(/^\/v1\/v1/, '/v1');
 
-  // Xóa // dư thừa
+  // Xóa slash dư
   path = path.replace(/\/{2,}/g, '/');
 
-  // Tự thêm /v1 nếu client gửi:
-  // /chat/completions
+  // =========================
+  // LOCAL HEALTH CHECK
+  // =========================
+
   if (
-    path !== '/' &&
-    !path.startsWith('/v1/')
-  ) {
-    path = '/v1' + path;
-  }
-
-  // =========================
-  // LOCAL TEST ENDPOINT
-  // =========================
-
-  if (req.method === 'GET') {
-    if (
+    req.method === 'GET' &&
+    (
       path === '/' ||
       path === '/v1' ||
       path === '/v1/'
-    ) {
-      return jsonResponse({
-        status: 'online',
-        message: 'Vercel FreeTheAI Proxy Active',
-      });
-    }
+    )
+  ) {
+    return jsonResponse({
+      status: 'online',
+      message: 'Vercel FreeTheAI Proxy Active',
+      target: 'https://api.freetheai.org',
+    });
   }
 
   // =========================
-  // TARGET
+  // TARGET FREETHEAI
   // =========================
 
   const targetUrl =
@@ -73,7 +66,7 @@ export default async function handler(req) {
 
   try {
     // =========================
-    // FORWARD HEADERS
+    // HEADERS
     // =========================
 
     const headers = new Headers();
@@ -81,23 +74,16 @@ export default async function handler(req) {
     headers.set(
       'Accept',
       req.headers.get('accept') ||
-        'application/json, text/event-stream, */*'
+      'application/json, text/event-stream, */*'
     );
 
-    // Content-Type
-    const contentType =
-      req.headers.get('content-type');
+    headers.set(
+      'Content-Type',
+      req.headers.get('content-type') ||
+      'application/json'
+    );
 
-    if (contentType) {
-      headers.set('Content-Type', contentType);
-    } else {
-      headers.set(
-        'Content-Type',
-        'application/json'
-      );
-    }
-
-    // Authorization
+    // Forward Authorization
     const authorization =
       req.headers.get('authorization');
 
@@ -108,7 +94,7 @@ export default async function handler(req) {
       );
     }
 
-    // Một số client gửi API key bằng x-api-key
+    // Forward x-api-key nếu client dùng nó
     const apiKey =
       req.headers.get('x-api-key');
 
@@ -130,10 +116,10 @@ export default async function handler(req) {
     }
 
     // =========================
-    // REQUEST UPSTREAM
+    // FORWARD REQUEST
     // =========================
 
-    const upstreamResponse = await fetch(
+    const response = await fetch(
       targetUrl,
       {
         method: req.method,
@@ -147,7 +133,7 @@ export default async function handler(req) {
     // =========================
 
     const responseHeaders =
-      new Headers(upstreamResponse.headers);
+      new Headers(response.headers);
 
     responseHeaders.set(
       'Access-Control-Allow-Origin',
@@ -174,10 +160,10 @@ export default async function handler(req) {
     // =========================
 
     return new Response(
-      upstreamResponse.body,
+      response.body,
       {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
+        status: response.status,
+        statusText: response.statusText,
         headers: responseHeaders,
       }
     );
@@ -199,7 +185,7 @@ export default async function handler(req) {
 
 
 // =========================
-// JSON HELPER
+// JSON RESPONSE HELPER
 // =========================
 
 function jsonResponse(data, status = 200) {
@@ -216,4 +202,4 @@ function jsonResponse(data, status = 200) {
       },
     }
   );
-      }
+}
