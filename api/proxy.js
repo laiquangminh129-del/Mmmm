@@ -1,9 +1,9 @@
 export const config = {
-  runtime: 'edge', // Bật Vercel Edge Runtime để stream trực tiếp và chống Timeout
+  runtime: 'edge', // Sử dụng Vercel Edge Runtime chống Timeout & hỗ trợ Streaming
 };
 
 export default async function handler(req) {
-  // 1. Cấu hình CORS
+  // 1. Xử lý CORS Preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 200,
@@ -16,11 +16,17 @@ export default async function handler(req) {
   }
 
   const url = new URL(req.url);
-  let subPath = url.pathname.replace('/api/proxy', '');
+  
+  // Lấy đường dẫn gốc được truyền từ vercel.json
+  let subPath = url.searchParams.get('__path') || url.pathname;
+  url.searchParams.delete('__path'); // Xóa param ẩn để không làm bẩn URL sang FreeTheAI
+
+  // Chuẩn hóa subPath
+  subPath = subPath.replace('/api/proxy', '');
   if (!subPath) subPath = '/';
   subPath = subPath.replace(/\/v1\/v1/g, '/v1');
 
-  // 2. Giả lập phản hồi kiểm tra từ Lorebary
+  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra/ping từ Lorebary
   if (req.method === 'GET') {
     if (subPath === '/' || subPath === '/v1' || subPath === '/v1/' || subPath.includes('/chat/completions')) {
       return new Response(JSON.stringify({ status: 'online', message: 'OpenAI Compatible API Proxy Active' }), {
@@ -44,18 +50,20 @@ export default async function handler(req) {
     }
   }
 
+  // Đảm bảo đường dẫn luôn chứa /v1
   if (!subPath.startsWith('/v1') && subPath !== '/') {
     subPath = '/v1' + subPath;
   }
 
   const TARGET_HOST = 'api.freetheai.org';
-  const targetUrl = `https://${TARGET_HOST}${subPath}${url.search}`;
+  const queryString = url.search ? url.search : '';
+  const targetUrl = `https://${TARGET_HOST}${subPath}${queryString}`;
 
   try {
-    // 3. Giả dạng Header để FreeTheAI không phát hiện
+    // 3. Tái tạo Header sạch gửi tới FreeTheAI
     const headers = new Headers();
-    headers.set('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36');
-    headers.set('accept', '*/*');
+    headers.set('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    headers.set('accept', 'application/json, text/event-stream, */*');
     headers.set('host', TARGET_HOST);
 
     if (req.headers.has('authorization')) {
@@ -74,13 +82,18 @@ export default async function handler(req) {
       fetchOptions.body = req.body;
     }
 
-    // 4. Chuyển tiếp request và đẩy Stream trực tiếp về Lorebary
+    // 4. Chuyển tiếp request và Stream kết quả trực tiếp về
     const response = await fetch(targetUrl, fetchOptions);
 
-    const responseHeaders = new Headers(response.headers);
+    const responseHeaders = new Headers();
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Methods', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      responseHeaders.set('Content-Type', contentType);
+    }
 
     return new Response(response.body, {
       status: response.status,
@@ -88,7 +101,7 @@ export default async function handler(req) {
       headers: responseHeaders,
     });
   } catch (error) {
-    return new Response(JSON.stringify({ error: 'Proxy failed', message: error.message }), {
+    return new Response(JSON.stringify({ error: { code: 500, message: 'Proxy forwarding failed: ' + error.message } }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
