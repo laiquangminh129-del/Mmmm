@@ -1,5 +1,5 @@
 export const config = {
-  runtime: 'edge', // Sử dụng Vercel Edge Runtime chống Timeout & hỗ trợ Streaming
+  runtime: 'edge', // Bật Edge Runtime chống Timeout & hỗ trợ Streaming
 };
 
 export default async function handler(req) {
@@ -17,25 +17,25 @@ export default async function handler(req) {
 
   const url = new URL(req.url);
   
-  // Lấy đường dẫn gốc được truyền từ vercel.json
-  let subPath = url.searchParams.get('__path') || url.pathname;
-  url.searchParams.delete('__path'); // Xóa param ẩn để không làm bẩn URL sang FreeTheAI
+  // Trích xuất lại đường dẫn thực tế do vercel.json truyền sang
+  let targetPath = url.searchParams.get('path') || '';
+  url.searchParams.delete('path');
 
-  // Chuẩn hóa subPath
-  subPath = subPath.replace('/api/proxy', '');
-  if (!subPath) subPath = '/';
-  subPath = subPath.replace(/\/v1\/v1/g, '/v1');
+  if (targetPath.startsWith('/')) {
+    targetPath = targetPath.slice(1);
+  }
+  targetPath = targetPath.replace(/v1\/v1/g, 'v1');
 
-  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra/ping từ Lorebary
+  // 2. Giả lập phản hồi cho các request GET kiểm tra (Ping / Models) từ Lorebary
   if (req.method === 'GET') {
-    if (subPath === '/' || subPath === '/v1' || subPath === '/v1/' || subPath.includes('/chat/completions')) {
-      return new Response(JSON.stringify({ status: 'online', message: 'OpenAI Compatible API Proxy Active' }), {
+    if (!targetPath || targetPath === 'v1' || targetPath === 'v1/') {
+      return new Response(JSON.stringify({ status: 'online', message: 'Proxy Active' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       });
     }
 
-    if (subPath.includes('/models')) {
+    if (targetPath.includes('models')) {
       return new Response(JSON.stringify({
         object: 'list',
         data: [
@@ -50,39 +50,53 @@ export default async function handler(req) {
     }
   }
 
-  // Đảm bảo đường dẫn luôn chứa /v1
-  if (!subPath.startsWith('/v1') && subPath !== '/') {
-    subPath = '/v1' + subPath;
+  // Đảm bảo đường dẫn luôn bắt đầu bằng v1/
+  if (!targetPath.startsWith('v1')) {
+    targetPath = 'v1/' + targetPath;
   }
 
   const TARGET_HOST = 'api.freetheai.org';
   const queryString = url.search ? url.search : '';
-  const targetUrl = `https://${TARGET_HOST}${subPath}${queryString}`;
+  const targetUrl = `https://${TARGET_HOST}/${targetPath}${queryString}`;
 
   try {
-    // 3. Tái tạo Header sạch gửi tới FreeTheAI
+    // 3. Đọc dữ liệu Body an toàn
+    let bodyText = null;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      bodyText = await req.text();
+      try {
+        if (bodyText) {
+          const parsed = JSON.parse(bodyText);
+          if (!parsed.model || parsed.model.trim() === '') {
+            parsed.model = 'gpt-4o';
+          }
+          bodyText = JSON.stringify(parsed);
+        }
+      } catch (e) {
+        // Giữ nguyên nếu không phải JSON
+      }
+    }
+
+    // 4. Header giả dạng hợp lệ
     const headers = new Headers();
-    headers.set('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    headers.set('accept', 'application/json, text/event-stream, */*');
-    headers.set('host', TARGET_HOST);
+    headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    headers.set('Accept', 'application/json, text/event-stream, */*');
+    headers.set('Content-Type', req.headers.get('content-type') || 'application/json');
+    headers.set('Host', TARGET_HOST);
 
     if (req.headers.has('authorization')) {
-      headers.set('authorization', req.headers.get('authorization'));
-    }
-    if (req.headers.has('content-type')) {
-      headers.set('content-type', req.headers.get('content-type'));
+      headers.set('Authorization', req.headers.get('authorization'));
+    } else {
+      headers.set('Authorization', 'Bearer free');
     }
 
     const fetchOptions = {
       method: req.method,
       headers: headers,
+      body: bodyText,
     };
 
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      fetchOptions.body = req.body;
-    }
-
-    // 4. Chuyển tiếp request và Stream kết quả trực tiếp về
+    // 5. Chuyển tiếp request chính xác tới endpoint https://api.freetheai.org/v1/chat/completions
     const response = await fetch(targetUrl, fetchOptions);
 
     const responseHeaders = new Headers();
@@ -97,11 +111,11 @@ export default async function handler(req) {
 
     return new Response(response.body, {
       status: response.status,
-      statusText: response.statusText,
       headers: responseHeaders,
     });
+
   } catch (error) {
-    return new Response(JSON.stringify({ error: { code: 500, message: 'Proxy forwarding failed: ' + error.message } }), {
+    return new Response(JSON.stringify({ error: { code: 500, message: 'Proxy forwarding error: ' + error.message } }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
