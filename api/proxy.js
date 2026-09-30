@@ -1,104 +1,219 @@
 export const config = {
-  runtime: 'edge', // Sử dụng Vercel Edge Runtime chống Timeout & hỗ trợ Streaming
+  runtime: 'edge',
 };
 
 export default async function handler(req) {
-  // 1. Xử lý CORS Preflight
+  // =========================
+  // CORS PREFLIGHT
+  // =========================
   if (req.method === 'OPTIONS') {
     return new Response(null, {
-      status: 200,
+      status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400',
       },
     });
   }
 
   const url = new URL(req.url);
 
-  // Lấy nguyên vẹn chuỗi đường dẫn gốc từ parameter 'path'
-  let rawPath = url.searchParams.get('path') || '';
-  if (!rawPath.startsWith('/')) {
-    rawPath = '/' + rawPath;
+  // Path được truyền từ vercel.json
+  let path = url.searchParams.get('path') || '/';
+
+  if (!path.startsWith('/')) {
+    path = '/' + path;
   }
 
-  // Khử trùng lặp /v1/v1 nếu client gửi nhầm
-  let cleanPath = rawPath.replace(/\/v1\/v1/g, '/v1');
+  // =========================
+  // CLEAN PATH
+  // =========================
 
-  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra (Ping / Models) từ Lorebary & Janitor AI
+  // /v1/v1/chat/completions
+  // -> /v1/chat/completions
+  path = path.replace(/^\/v1\/v1/, '/v1');
+
+  // Xóa // dư thừa
+  path = path.replace(/\/{2,}/g, '/');
+
+  // Tự thêm /v1 nếu client gửi:
+  // /chat/completions
+  if (
+    path !== '/' &&
+    !path.startsWith('/v1/')
+  ) {
+    path = '/v1' + path;
+  }
+
+  // =========================
+  // LOCAL TEST ENDPOINT
+  // =========================
+
   if (req.method === 'GET') {
-    if (cleanPath === '/' || cleanPath === '/v1' || cleanPath === '/v1/') {
-      return new Response(JSON.stringify({ status: 'online', message: 'Proxy Active' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-      });
-    }
-
-    if (cleanPath.includes('/models')) {
-      return new Response(JSON.stringify({
-        object: 'list',
-        data: [
-          { id: 'gpt-4o', object: 'model', created: 1700000000, owned_by: 'system' },
-          { id: 'gpt-4-turbo', object: 'model', created: 1700000000, owned_by: 'system' },
-          { id: 'claude-3-5-sonnet', object: 'model', created: 1700000000, owned_by: 'system' }
-        ]
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    if (
+      path === '/' ||
+      path === '/v1' ||
+      path === '/v1/'
+    ) {
+      return jsonResponse({
+        status: 'online',
+        message: 'Vercel FreeTheAI Proxy Active',
       });
     }
   }
 
-  // Tự động bổ sung /v1 nếu chưa có
-  if (!cleanPath.startsWith('/v1') && cleanPath !== '/') {
-    cleanPath = '/v1' + cleanPath;
-  }
+  // =========================
+  // TARGET
+  // =========================
 
-  const TARGET_HOST = 'api.freetheai.org';
-  const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
+  const targetUrl =
+    `https://api.freetheai.org${path}`;
 
   try {
-    // 3. Chuẩn bị Header chuyển tiếp
+    // =========================
+    // FORWARD HEADERS
+    // =========================
+
     const headers = new Headers();
-    headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    headers.set('Accept', 'application/json, text/event-stream, */*');
-    headers.set('Content-Type', req.headers.get('content-type') || 'application/json');
 
-    // Không set 'Host' thủ công ở đây để fetch tự động xử lý SNI cho Cloudflare
+    headers.set(
+      'Accept',
+      req.headers.get('accept') ||
+        'application/json, text/event-stream, */*'
+    );
 
-    if (req.headers.has('authorization')) {
-      headers.set('Authorization', req.headers.get('authorization'));
+    // Content-Type
+    const contentType =
+      req.headers.get('content-type');
+
+    if (contentType) {
+      headers.set('Content-Type', contentType);
     } else {
-      headers.set('Authorization', 'Bearer free');
+      headers.set(
+        'Content-Type',
+        'application/json'
+      );
     }
 
-    const fetchOptions = {
-      method: req.method,
-      headers: headers,
-    };
+    // Authorization
+    const authorization =
+      req.headers.get('authorization');
 
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      fetchOptions.body = req.body;
+    if (authorization) {
+      headers.set(
+        'Authorization',
+        authorization
+      );
     }
 
-    // 4. Chuyển tiếp tới target URL
-    const response = await fetch(targetUrl, fetchOptions);
+    // Một số client gửi API key bằng x-api-key
+    const apiKey =
+      req.headers.get('x-api-key');
 
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', '*');
-    responseHeaders.set('Access-Control-Allow-Headers', '*');
+    if (apiKey) {
+      headers.set('x-api-key', apiKey);
+    }
 
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders,
-    });
+    // =========================
+    // BODY
+    // =========================
+
+    let body = undefined;
+
+    if (
+      req.method !== 'GET' &&
+      req.method !== 'HEAD'
+    ) {
+      body = await req.arrayBuffer();
+    }
+
+    // =========================
+    // REQUEST UPSTREAM
+    // =========================
+
+    const upstreamResponse = await fetch(
+      targetUrl,
+      {
+        method: req.method,
+        headers,
+        body,
+      }
+    );
+
+    // =========================
+    // RESPONSE HEADERS
+    // =========================
+
+    const responseHeaders =
+      new Headers(upstreamResponse.headers);
+
+    responseHeaders.set(
+      'Access-Control-Allow-Origin',
+      '*'
+    );
+
+    responseHeaders.set(
+      'Access-Control-Allow-Methods',
+      'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+    );
+
+    responseHeaders.set(
+      'Access-Control-Allow-Headers',
+      '*'
+    );
+
+    responseHeaders.set(
+      'Access-Control-Expose-Headers',
+      '*'
+    );
+
+    // =========================
+    // STREAM RESPONSE
+    // =========================
+
+    return new Response(
+      upstreamResponse.body,
+      {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: responseHeaders,
+      }
+    );
 
   } catch (error) {
-    return new Response(JSON.stringify({ error: { code: 500, message: 'Proxy forwarding error: ' + error.message } }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-    });
+    return jsonResponse(
+      {
+        error: {
+          type: 'proxy_error',
+          message:
+            error?.message ||
+            'Failed to connect to FreeTheAI',
+        },
+      },
+      500
+    );
   }
 }
+
+
+// =========================
+// JSON HELPER
+// =========================
+
+function jsonResponse(data, status = 200) {
+  return new Response(
+    JSON.stringify(data),
+    {
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods':
+          'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+      },
+    }
+  );
+      }
