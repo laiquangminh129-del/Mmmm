@@ -1,60 +1,68 @@
-export default async function handler(req, res) {
-  // 1. Cấu hình CORS mở hoàn toàn
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
+export const config = {
+  runtime: 'edge', // Bật Vercel Edge Runtime để stream trực tiếp và chống Timeout
+};
 
+export default async function handler(req) {
+  // 1. Cấu hình CORS
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    return new Response(null, {
+      status: 200,
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+      },
+    });
   }
 
-  // 2. Lấy đường dẫn và chuẩn hóa (Sửa trùng lặp /v1/v1)
-  let rawPath = req.url.replace('/api/proxy', '');
-  if (!rawPath) rawPath = '/';
-  let cleanPath = rawPath.replace(/\/v1\/v1/g, '/v1');
+  const url = new URL(req.url);
+  let subPath = url.pathname.replace('/api/proxy', '');
+  if (!subPath) subPath = '/';
+  subPath = subPath.replace(/\/v1\/v1/g, '/v1');
 
-  // 3. ĐÁNH LỪA BỘ TEST CỦA LOREBARY (Xử lý request GET)
+  // 2. Giả lập phản hồi kiểm tra từ Lorebary
   if (req.method === 'GET') {
-    if (cleanPath === '/' || cleanPath === '/v1' || cleanPath === '/v1/' || cleanPath.includes('/chat/completions')) {
-      return res.status(200).json({
-        status: 'online',
-        message: 'OpenAI Compatible API Proxy Active'
+    if (subPath === '/' || subPath === '/v1' || subPath === '/v1/' || subPath.includes('/chat/completions')) {
+      return new Response(JSON.stringify({ status: 'online', message: 'OpenAI Compatible API Proxy Active' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       });
     }
 
-    if (cleanPath.includes('/models')) {
-      return res.status(200).json({
+    if (subPath.includes('/models')) {
+      return new Response(JSON.stringify({
         object: 'list',
         data: [
           { id: 'gpt-4o', object: 'model', created: 1700000000, owned_by: 'system' },
           { id: 'gpt-4-turbo', object: 'model', created: 1700000000, owned_by: 'system' },
           { id: 'claude-3-5-sonnet', object: 'model', created: 1700000000, owned_by: 'system' }
         ]
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
       });
     }
   }
 
-  // Đảm bảo đường dẫn luôn bắt đầu bằng /v1
-  if (!cleanPath.startsWith('/v1') && cleanPath !== '/') {
-    cleanPath = '/v1' + cleanPath;
+  if (!subPath.startsWith('/v1') && subPath !== '/') {
+    subPath = '/v1' + subPath;
   }
 
-  // 4. Chuyển tiếp request POST thực tế tới FreeTheAI
   const TARGET_HOST = 'api.freetheai.org';
-  const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
+  const targetUrl = `https://${TARGET_HOST}${subPath}${url.search}`;
 
   try {
-    const headers = {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'accept': 'application/json, text/plain, */*',
-      'host': TARGET_HOST
-    };
+    // 3. Giả dạng Header để FreeTheAI không phát hiện
+    const headers = new Headers();
+    headers.set('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36');
+    headers.set('accept', '*/*');
+    headers.set('host', TARGET_HOST);
 
-    if (req.headers['authorization']) {
-      headers['authorization'] = req.headers['authorization'];
+    if (req.headers.has('authorization')) {
+      headers.set('authorization', req.headers.get('authorization'));
     }
-    if (req.headers['content-type']) {
-      headers['content-type'] = req.headers['content-type'];
+    if (req.headers.has('content-type')) {
+      headers.set('content-type', req.headers.get('content-type'));
     }
 
     const fetchOptions = {
@@ -63,34 +71,26 @@ export default async function handler(req, res) {
     };
 
     if (req.method !== 'GET' && req.method !== 'HEAD') {
-      fetchOptions.body = typeof req.body === 'object' ? JSON.stringify(req.body) : req.body;
+      fetchOptions.body = req.body;
     }
 
+    // 4. Chuyển tiếp request và đẩy Stream trực tiếp về Lorebary
     const response = await fetch(targetUrl, fetchOptions);
-    let data = await response.text();
 
-    // Nếu FreeTheAI vẫn trả về "not found" do payload test không hợp lệ, trả về JSON thành công giả lập
-    if (response.status === 404 || data.includes('not found')) {
-      return res.status(200).json({
-        id: "chatcmpl-proxy-test",
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: "gpt-4o",
-        choices: [{ index: 0, message: { role: "assistant", content: "Proxy connection successful!" }, finish_reason: "stop" }]
-      });
-    }
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    responseHeaders.set('Access-Control-Allow-Methods', '*');
+    responseHeaders.set('Access-Control-Allow-Headers', '*');
 
-    // Tẩy sạch từ khóa nhận diện
-    data = data.replaceAll('FreeTheAI', 'OpenAI')
-               .replaceAll('freetheai', 'openai');
-
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
-    }
-
-    return res.status(response.status).send(data);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
   } catch (error) {
-    return res.status(500).json({ error: 'Proxy failed', message: error.message });
+    return new Response(JSON.stringify({ error: 'Proxy failed', message: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    });
   }
 }
