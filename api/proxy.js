@@ -17,7 +17,7 @@ export default async function handler(req) {
 
   const url = new URL(req.url);
 
-  // Lấy nguyên vẹn chuỗi đường dẫn gốc từ $1
+  // Lấy nguyên vẹn chuỗi đường dẫn gốc từ parameter 'path'
   let rawPath = url.searchParams.get('path') || '';
   if (!rawPath.startsWith('/')) {
     rawPath = '/' + rawPath;
@@ -26,7 +26,7 @@ export default async function handler(req) {
   // Khử trùng lặp /v1/v1 nếu client gửi nhầm
   let cleanPath = rawPath.replace(/\/v1\/v1/g, '/v1');
 
-  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra (Ping / Models) từ Lorebary
+  // 2. Trả về phản hồi giả lập cho các request GET kiểm tra (Ping / Models) từ Lorebary & Janitor AI
   if (req.method === 'GET') {
     if (cleanPath === '/' || cleanPath === '/v1' || cleanPath === '/v1/') {
       return new Response(JSON.stringify({ status: 'online', message: 'Proxy Active' }), {
@@ -59,12 +59,13 @@ export default async function handler(req) {
   const targetUrl = `https://${TARGET_HOST}${cleanPath}`;
 
   try {
-    // 3. Header giả dạng hợp lệ
+    // 3. Chuẩn bị Header chuyển tiếp
     const headers = new Headers();
     headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     headers.set('Accept', 'application/json, text/event-stream, */*');
     headers.set('Content-Type', req.headers.get('content-type') || 'application/json');
-    headers.set('Host', TARGET_HOST);
+
+    // Không set 'Host' thủ công ở đây để fetch tự động xử lý SNI cho Cloudflare
 
     if (req.headers.has('authorization')) {
       headers.set('Authorization', req.headers.get('authorization'));
@@ -81,7 +82,7 @@ export default async function handler(req) {
       fetchOptions.body = req.body;
     }
 
-    // 4. Chuyển tiếp tới đúng URL https://api.freetheai.org/v1/chat/completions
+    // 4. Chuyển tiếp tới target URL
     const response = await fetch(targetUrl, fetchOptions);
 
     const responseHeaders = new Headers(response.headers);
