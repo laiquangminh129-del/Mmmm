@@ -3,7 +3,6 @@ export const config = {
 };
 
 export default async function handler(req) {
-  // 1. CORS Preflight
   if (req.method === \'OPTIONS\') {
     return new Response(null, {
       status: 204,
@@ -16,17 +15,11 @@ export default async function handler(req) {
   }
 
   const url = new URL(req.url);
-  // FIX QUAN TRỌNG: Lấy từ pathname chứ không phải searchParams
   let rawPath = url.pathname.replace(\'/api/proxy\', \'\');
   if (!rawPath) rawPath = \'/\';
-  
-  // Giữ lại query string gốc nếu có ?stream=true
-  const queryString = url.search; 
-
-  // Khử /v1/v1
+  const queryString = url.search;
   let cleanPath = rawPath.replace(/\/v1\/v1/g, \'/v1\');
 
-  // 2. Fake GET cho LB và JAI test
   if (req.method === \'GET\') {
     if (cleanPath === \'/\' || cleanPath === \'/v1\' || cleanPath === \'/v1/\') {
       return new Response(JSON.stringify({ status: \'online\', message: \'Proxy Active\' }), {
@@ -49,7 +42,6 @@ export default async function handler(req) {
     }
   }
 
-  // Tự thêm /v1 nếu thiếu
   if (!cleanPath.startsWith(\'/v1\') && cleanPath !== \'/\') {
     cleanPath = \'/v1\' + cleanPath;
   }
@@ -58,30 +50,28 @@ export default async function handler(req) {
   const targetUrl = `https://${TARGET_HOST}${cleanPath}${queryString}`;
 
   try {
-    const headers = new Headers();
-    headers.set(\'User-Agent\', \'Mozilla/5.0\');
-    headers.set(\'Accept\', \'application/json, text/event-stream, */*\');
-    
-    const contentType = req.headers.get(\'content-type\');
-    if (contentType) headers.set(\'Content-Type\', contentType);
-    
-    // Authorization
-    if (req.headers.has(\'authorization\')) {
-      headers.set(\'Authorization\', req.headers.get(\'authorization\'));
-    } else {
-      headers.set(\'Authorization\', \'Bearer free\');
+    // FIX LỖI 500: phải đọc body ra trước
+    let body = undefined;
+    if (req.method !== \'GET\' && req.method !== \'HEAD\') {
+      body = await req.text();
     }
 
-    const fetchOptions = {
+    const headers = new Headers();
+    headers.set(\'Accept\', \'application/json, text/event-stream, */*\');
+    if (req.headers.get(\'content-type\')) {
+      headers.set(\'Content-Type\', req.headers.get(\'content-type\'));
+    }
+    headers.set(\'Authorization\', req.headers.get(\'authorization\') || \'Bearer free\');
+    headers.set(\'User-Agent\', \'Mozilla/5.0\');
+
+    // Đừng set Host thủ công nữa, fetch tự lo
+
+    const response = await fetch(targetUrl, {
       method: req.method,
       headers: headers,
-      body: req.method !== \'GET\' && req.method !== \'HEAD\' ? req.body : undefined,
-      duplex: \'half\',
-    };
+      body: body,
+    });
 
-    const response = await fetch(targetUrl, fetchOptions);
-
-    // FIX QUAN TRỌNG: Không dùng response.text() nữa, pipe stream trực tiếp
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set(\'Access-Control-Allow-Origin\', \'*\');
     responseHeaders.set(\'Access-Control-Allow-Methods\', \'*\');
@@ -93,9 +83,9 @@ export default async function handler(req) {
     });
 
   } catch (error) {
-    return new Response(JSON.stringify({ error: { message: \'Proxy error: \' + error.message } }), {
+    return new Response(JSON.stringify({ error: { message: error.message, stack: error.stack } }), {
       status: 500,
       headers: { \'Content-Type\': \'application/json\', \'Access-Control-Allow-Origin\': \'*\' }
     });
   }
-        }
+           }
