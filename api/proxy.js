@@ -1,31 +1,107 @@
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "*");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Authorization, Content-Type, Accept"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
   try {
-    let rawPath = req.url.replace("/api/proxy", "").split("?")[0];
-    if (!rawPath) rawPath = "/";
-    let cleanPath = rawPath.replace(/\/v1\/v1/g, "/v1");
-    if (req.method === "GET") {
-      if (cleanPath === "/" || cleanPath === "/v1" || cleanPath === "/v1/" || cleanPath.includes("/chat/completions")) {
-        return res.status(200).json({ status: "online", message: "Proxy Active" });
-      }
-      if (cleanPath.includes("/models")) {
-        return res.status(200).json({ object: "list", data: [{ id: "gpt-4o", object: "model", created: 1700000000, owned_by: "system" }, { id: "gpt-4-turbo", object: "model", created: 1700000000, owned_by: "system" }] });
+    const apiKey = process.env.FREETHEAI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: {
+          message: "Missing FREETHEAI_API_KEY environment variable"
+        }
+      });
+    }
+
+    let path = req.query.path;
+
+    if (Array.isArray(path)) path = path[0];
+
+    if (typeof path !== "string" || !path.startsWith("/")) {
+      return res.status(400).json({
+        error: { message: "Invalid proxy path" }
+      });
+    }
+
+    // Prevent forwarding to arbitrary external hosts.
+    path = path.split("?")[0];
+
+    // Normalize duplicated version prefixes.
+    path = path.replace(/^\/v1\/v1(?=\/|$)/, "/v1");
+
+    // Accept /models and /chat/completions as well.
+    if (!path.startsWith("/v1/") && path !== "/v1") {
+      path = "/v1" + (path === "/" ? "" : path);
+    }
+
+    const targetUrl = new URL(
+      "https://api.freetheai.org" + path
+    );
+
+    // Preserve query parameters except the internal routing parameter.
+    for (const [key, value] of Object.entries(req.query)) {
+      if (key === "path") continue;
+
+      for (const item of Array.isArray(value) ? value : [value]) {
+        if (item !== undefined) {
+          targetUrl.searchParams.append(key, String(item));
+        }
       }
     }
-    if (!cleanPath.startsWith("/v1") && cleanPath !== "/") cleanPath = "/v1" + cleanPath;
-    const targetUrl = `https://api.freetheai.org${cleanPath}`;
-    const headers = { "Accept": req.headers["accept"] || "*/*", "User-Agent": "Mozilla/5.0", "Authorization": req.headers["authorization"] || "Bearer free" };
-    if (req.headers["content-type"]) headers["Content-Type"] = req.headers["content-type"];
-    const body = req.method !== "GET" && req.method !== "HEAD" && req.body ? JSON.stringify(req.body) : undefined;
-    const response = await fetch(targetUrl, { method: req.method, headers, body });
-    const data = await response.text();
-    const ct = response.headers.get("content-type");
-    if (ct) res.setHeader("Content-Type", ct);
-    return res.status(response.status).send(data);
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+
+    const headers = {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: req.headers.accept || "application/json"
+    };
+
+    if (req.headers["content-type"]) {
+      headers["Content-Type"] = req.headers["content-type"];
+    }
+
+    const init = {
+      method: req.method,
+      headers
+    };
+
+    if (!["GET", "HEAD"].includes(req.method)) {
+      init.body =
+        typeof req.body === "string"
+          ? req.body
+          : req.body == null
+            ? undefined
+            : JSON.stringify(req.body);
+    }
+
+    const upstream = await fetch(targetUrl, init);
+    const responseText = await upstream.text();
+
+    res.status(upstream.status);
+
+    const contentType = upstream.headers.get("content-type");
+    if (contentType) {
+      res.setHeader("Content-Type", contentType);
+    }
+
+    return res.send(responseText);
+  } catch (error) {
+    console.error("Proxy error:", error);
+
+    return res.status(502).json({
+      error: {
+        message: "Proxy upstream request failed"
+      }
+    });
   }
 }
